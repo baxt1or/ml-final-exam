@@ -1,8 +1,5 @@
-import pandas as pd
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from tokenizers import Tokenizer
 
 from model.transformer import EncoderTransformerClassifier, vocab_size, n_embd, n_head, n_layer, block_size

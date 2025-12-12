@@ -3,7 +3,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 import regex as re
 import warnings
