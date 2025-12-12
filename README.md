@@ -3,10 +3,12 @@
 
 
 # Models from zero to hero
-1. Baseline -> BoW + Linear
-2. Embeddings + Mean Pool
-3. LSTM 
-4. Encoder-only Transformer
+1. Baseline -> BoW + Linear Layer
+2. Embeddings + Linear Layer
+3. Encoder-Only Transformer
 
 
 # Final Results
+Encoder-Transformer model Loss:
+Embeddings + Linaer model Loss: 
+BoW + Linear model Loss: 1499.8845
