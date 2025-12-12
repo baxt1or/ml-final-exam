@@ -2,11 +2,11 @@ import numpy as np
 import torch
 from tokenizers import Tokenizer
 
-from model.transformer import EncoderTransformerClassifier, vocab_size, n_embd, n_head, n_layer, block_size
+from transformer.transformer import EncoderTransformerClassifier, vocab_size, n_embd, n_head, n_layer, block_size
 
 
 # Load tokenizer
-tokenizer = Tokenizer.from_file("./model/tokenizer.json")
+tokenizer = Tokenizer.from_file("./transformer/tokenizer.json")
 
 # Load model
 model = EncoderTransformerClassifier(
@@ -18,7 +18,7 @@ model = EncoderTransformerClassifier(
     n_classes=3
 )
 
-model.load_state_dict(torch.load("./model/encoder_transformer_classifier.pth", map_location='cpu'))
+model.load_state_dict(torch.load("./transformer/encoder_transformer_classifier.pth", map_location='cpu'))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 model.eval()
