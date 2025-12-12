@@ -9,6 +9,6 @@
 
 
 # Final Results
-Encoder-Transformer model Loss:
-Embeddings + Linaer model Loss: 
-BoW + Linear model Loss: 1499.8845
+- Encoder-Transformer model loss = 0.1891
+- Embeddings + Linaer model Loss: 0.2752
+- BoW + Linear model Loss: 1499.8845
