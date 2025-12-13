@@ -34,7 +34,7 @@ target_column = "rnk"
 
 
 
-uzum_reviews_df = pd.read_parquet("./data/uzum_dataset.parquet", engine='pyarrow')
+uzum_reviews_df = pd.read_parquet("../data/uzum_dataset.parquet", engine='pyarrow')
 uzum_reviews_df["len"] = uzum_reviews_df["normalized_review_text"].str.len()
 uzum_reviews_filtered_df = uzum_reviews_df[uzum_reviews_df["len"] <= block_size]
 rating_map = {
