@@ -3,22 +3,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 import regex as re
 import warnings
 import swifter
-
 from torch.utils.data import TensorDataset, DataLoader
-
-
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 warnings.filterwarnings("ignore")
 
 
-
+# ALL PARAMETERS
 vocab_size=30000
-
 batch_size = 64
-block_size = 80 # number of tokens in one sentence
+block_size = 80 
 learning_rate = 3e-3
 
 max_iter = 10
@@ -28,32 +24,31 @@ n_head = 4
 n_layer = 4
 dropout = 0.2
 
-
-text_column = "clean_text"
-target_column = "rnk"
+n_classes = 3
 
 
 
-uzum_reviews_df = pd.read_parquet("../data/uzum_dataset.parquet", engine='pyarrow')
-uzum_reviews_df["len"] = uzum_reviews_df["normalized_review_text"].str.len()
-uzum_reviews_filtered_df = uzum_reviews_df[uzum_reviews_df["len"] <= block_size]
-rating_map = {
-    'very poor' : 0,
-    'poor' : 0,
-    'fair' : 1,
-    'good' : 2,
-    'excellent' : 2
-}
-
-uzum_reviews_filtered_df["rnk"] = uzum_reviews_filtered_df["rating"].map(rating_map)
-
-
-def normalize_uzum_reviews(df: pd.DataFrame) -> pd.DataFrame:
+# PREPROCESSING UZUM TEXT DATA
+def get_normalized_uzum_reviews():
     """
     cleans the text based on the following criterias listed below
     :param df: pandas dataframe
     :returns: cleaned pandas dataframe
     """
+
+    uzum_reviews_df = pd.read_parquet("./data/uzum_dataset.parquet", engine='pyarrow')
+    uzum_reviews_df["len"] = uzum_reviews_df["normalized_review_text"].str.len()
+    uzum_reviews_filtered_df = uzum_reviews_df[uzum_reviews_df["len"] <= block_size]
+    rating_map = {
+    'very poor' : 0,
+    'poor' : 0,
+    'fair' : 1,
+    'good' : 2,
+    'excellent' : 2
+     }
+
+    uzum_reviews_filtered_df["rnk"] = uzum_reviews_filtered_df["rating"].map(rating_map)
+
 
     latin = r"\p{Latin}"
     cyrillic = r"\p{Cyrillic}"
@@ -121,34 +116,33 @@ def normalize_uzum_reviews(df: pd.DataFrame) -> pd.DataFrame:
     def normalize_text(text: str) -> str:
         out = []
         for ch in text:
-        # skip unwanted characters
+            # skips unnessary ones
             if ch in final_clean:
                continue
 
-        # keep only allowed characters (latin, cyrillic, digits, spaces)
+            # keeps only necessary chars
             if not allowed_re.fullmatch(ch):
                continue
 
-        # map special latin → uzbek letters
+            # maps final
             out.append(latin_map.get(ch, ch))
 
         return "".join(out)
 
 
-    df['clean_text'] = df["normalized_review_text"].astype(str).swifter.apply(normalize_text)
+    uzum_reviews_filtered_df['clean_text'] = uzum_reviews_filtered_df["normalized_review_text"].astype(str).swifter.apply(normalize_text)
 
-    return df
-
-
+    return uzum_reviews_filtered_df[['clean_text', 'rnk']]
 
 
+# TOKENIZES DATA 
 def get_token_data():
     """
-    Trains a BPE tokenizer on the text column, encodes + pads the texts
+    trains a BPE tokenizer on the text column, encodes + pads the texts
     :returns: X (tensor), y (tensor), tokenizer (trained)
     """
 
-    uzum_df = normalize_uzum_reviews(uzum_reviews_filtered_df)
+    uzum_df = get_normalized_uzum_reviews()
 
 
     tokenizer = Tokenizer(models.BPE())
@@ -161,29 +155,32 @@ def get_token_data():
     )
 
 
-    tokenizer.train_from_iterator(uzum_df[text_column].astype(str).tolist(), trainer)
+    tokenizer.train_from_iterator(uzum_df["clean_text"].astype(str).tolist(), trainer)
 
     PAD_ID = tokenizer.token_to_id("<pad>")
     UNK_ID = tokenizer.token_to_id("<unk>")
 
 
-    def padding_sentence(ids, max_len=block_size, pad_id=PAD_ID):
-        if len(ids) < max_len:
-            ids += [pad_id] * (max_len - len(ids))
-        return ids[:max_len]
+    def padding_sentence(ids):
+        if len(ids) < block_size:
+            ids += [PAD_ID] * (block_size - len(ids))
+        return ids[:block_size]
 
 
-    X_seq = [padding_sentence(tokenizer.encode(str(t)).ids) for t in uzum_df[text_column]]
+    X_seq = [padding_sentence(tokenizer.encode(str(t)).ids) for t in uzum_df["clean_text"]]
 
 
     X = torch.tensor(X_seq, dtype=torch.long)
-    y = torch.tensor(uzum_df[target_column].values, dtype=torch.long)
+    y = torch.tensor(uzum_df["rnk"].values, dtype=torch.long)
 
     return X, y, tokenizer
 
 
 
 
+
+
+# SELF-ATTENTION BLOCK
 class SelfAttention(nn.Module):
     def __init__(self, head_size):
         super().__init__()
@@ -253,9 +250,9 @@ class Block(nn.Module):
 
 
 
-
+# ENCODER ONLY TRANSFORMER
 class EncoderTransformerClassifier(nn.Module):
-    def __init__(self, vocab_size, n_embd, n_head, n_layer, block_size, n_classes):
+    def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
@@ -306,31 +303,24 @@ class EncoderTransformerClassifier(nn.Module):
 
 
 # getting data in proper format
-X, y, tokenizer = get_token_data()
+data, targets, tokenizer = get_token_data()
 
-dataset = TensorDataset(X, y)
-loader = DataLoader(dataset, batch_size=64, shuffle=True)
+dataset = TensorDataset(data, targets)
+loader = DataLoader(dataset, batch_size, shuffle=True)
 
 
-
+# transforming to cude GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using:", device)
 
 
-model = EncoderTransformerClassifier(
-    vocab_size=vocab_size,
-    n_embd=n_embd,
-    n_head=n_head,
-    n_layer=n_layer,
-    block_size=block_size,
-    n_classes=3
-).to(device)
-
-
+# MODEL BUILDING
+model = EncoderTransformerClassifier().to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 
+# TRANING LOOP
 for epoch in range(max_iter):
     model.train()
     total_loss = 0
@@ -350,17 +340,15 @@ for epoch in range(max_iter):
 
 
 
+
+# getting some predictions
 probs = model.predict("manga yoqdi mol", tokenizer)[0].tolist()
-
 out = np.argmax(probs)
-
 print(probs)
 print('excellent' if out == 2 else 'fair' if out == 1 else 'poor')
 
 
 
-# Save model state_dict
+# SAVING MODEL AND TOKENIZER
 torch.save(model.state_dict(), "encoder_transformer_classifier.pth")
-
-# Save tokenizer
 tokenizer.save("tokenizer.json")
