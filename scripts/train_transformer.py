@@ -6,49 +6,50 @@ import torch.nn.functional as F
 import regex as re
 import warnings
 import swifter
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, random_split
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
-warnings.filterwarnings("ignore")
 
 
-# ALL PARAMETERS
-vocab_size=30000
+# PARAMETERS OF MODEL
+block_size = 128
 batch_size = 64
-block_size = 80 
-learning_rate = 3e-3
-
-max_iter = 10
-
-n_embd = 64
+vocab_size = 30_000
+n_embd = 128
 n_head = 4
 n_layer = 4
 dropout = 0.2
-
+learning_rate = 3e-4
+max_iter = 5
 n_classes = 3
 
 
+# TRAINING
+train_size = 315704
+val_size = 35079
 
-# PREPROCESSING UZUM TEXT DATA
-def get_normalized_uzum_reviews():
-    """
-    cleans the text based on the following criterias listed below
-    :param df: pandas dataframe
-    :returns: cleaned pandas dataframe
-    """
+# PADDING
+pad_token = '<pad>'
+unk_token = "<unk>"
 
-    uzum_reviews_df = pd.read_parquet("./data/uzum_dataset.parquet", engine='pyarrow')
-    uzum_reviews_df["len"] = uzum_reviews_df["normalized_review_text"].str.len()
-    uzum_reviews_filtered_df = uzum_reviews_df[uzum_reviews_df["len"] <= block_size]
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using:", device)
+
+
+
+# DATA NORMALIZATION
+def get_normalized_customer_reviews():
+    uzum_df = pd.read_parquet("./uzum_dataset.parquet", engine='pyarrow')
     rating_map = {
-    'very poor' : 0,
     'poor' : 0,
+    'very poor' : 0,
     'fair' : 1,
     'good' : 2,
     'excellent' : 2
-     }
+    }
 
-    uzum_reviews_filtered_df["rnk"] = uzum_reviews_filtered_df["rating"].map(rating_map)
-
+    uzum_df["rank"] = uzum_df["rating"].map(rating_map)
+    uzum_df.drop('rating', axis=1, inplace=True)
 
     latin = r"\p{Latin}"
     cyrillic = r"\p{Cyrillic}"
@@ -129,58 +130,48 @@ def get_normalized_uzum_reviews():
 
         return "".join(out)
 
+    uzum_df["review_text"] = uzum_df["normalized_review_text"].astype(str).swifter.apply(normalize_text)
+    uzum_df['len'] = uzum_df['review_text'].astype(str).str.len()
+    uzum_df = uzum_df[uzum_df['len'] > 0].drop(['len', 'normalized_review_text'], axis=1)[['review_text', 'rank']]
 
-    uzum_reviews_filtered_df['clean_text'] = uzum_reviews_filtered_df["normalized_review_text"].astype(str).swifter.apply(normalize_text)
-
-    return uzum_reviews_filtered_df[['clean_text', 'rnk']]
-
-
-# TOKENIZES DATA 
-def get_token_data():
-    """
-    trains a BPE tokenizer on the text column, encodes + pads the texts
-    :returns: X (tensor), y (tensor), tokenizer (trained)
-    """
-
-    uzum_df = get_normalized_uzum_reviews()
+    return uzum_df
 
 
-    tokenizer = Tokenizer(models.BPE())
-    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+
+def get_tokenized_data():
+
+  df = get_normalized_customer_reviews()
+
+  tokenizer = Tokenizer(models.BPE())
+  tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
 
 
-    trainer = trainers.BpeTrainer(
+  trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
-        special_tokens=["<pad>", "<unk>"]
+        special_tokens=[pad_token, unk_token]
     )
 
+  tokenizer.train_from_iterator(df["review_text"].astype(str).tolist(), trainer)
 
-    tokenizer.train_from_iterator(uzum_df["clean_text"].astype(str).tolist(), trainer)
+  PAD_ID = tokenizer.token_to_id(pad_token)
+  UNK_ID = tokenizer.token_to_id(unk_token)
 
-    PAD_ID = tokenizer.token_to_id("<pad>")
-    UNK_ID = tokenizer.token_to_id("<unk>")
-
-
-    def padding_sentence(ids):
-        if len(ids) < block_size:
-            ids += [PAD_ID] * (block_size - len(ids))
-        return ids[:block_size]
+  def encode_and_padding(text):
+    ids = tokenizer.encode(text).ids[:block_size]
+    ids += [PAD_ID] * (block_size - len(ids))
+    return ids
 
 
-    X_seq = [padding_sentence(tokenizer.encode(str(t)).ids) for t in uzum_df["clean_text"]]
+  X_padded = [encode_and_padding(t) for t in df["review_text"]]
 
+  data = torch.tensor(X_padded, dtype=torch.long)
+  targets = torch.tensor(df['rank'].values, dtype=torch.long)
 
-    X = torch.tensor(X_seq, dtype=torch.long)
-    y = torch.tensor(uzum_df["rnk"].values, dtype=torch.long)
-
-    return X, y, tokenizer
+  return data, targets, tokenizer
 
 
 
-
-
-
-# SELF-ATTENTION BLOCK
+# TRANSFORMER MODEL
 class SelfAttention(nn.Module):
     def __init__(self, head_size):
         super().__init__()
@@ -195,7 +186,7 @@ class SelfAttention(nn.Module):
         k = self.key(x)           # (B,T,hs)
         q = self.query(x)         # (B,T,hs)
 
-        wei = q @ k.transpose(-2, -1) * C**-0.5
+        wei = q @ k.transpose(-2, -1) * (k.size(-1)**-0.5)
         wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
 
@@ -218,7 +209,6 @@ class MultiHeadAttention(nn.Module):
         return out
 
 
-
 class FeedForward(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
@@ -231,7 +221,6 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-
 
 
 class Block(nn.Module):
@@ -249,8 +238,6 @@ class Block(nn.Module):
         return x
 
 
-
-# ENCODER ONLY TRANSFORMER
 class EncoderTransformerClassifier(nn.Module):
     def __init__(self):
         super().__init__()
@@ -271,7 +258,8 @@ class EncoderTransformerClassifier(nn.Module):
 
         x = self.blocks(x)
         x = self.ln_f(x)
-        x_cls = x.mean(dim=1)
+        lengths = (idx != 0).sum(dim=1) - 1
+        x_cls = x[torch.arange(B), lengths]
 
         logits = self.classifier(x_cls)
 
@@ -298,57 +286,125 @@ class EncoderTransformerClassifier(nn.Module):
             probs = F.softmax(logits, dim=1)
 
         return probs.cpu().numpy()
-    
-
-
 
 # getting data in proper format
-data, targets, tokenizer = get_token_data()
+data, targets, tokenizer = get_tokenized_data()
+
 
 dataset = TensorDataset(data, targets)
-loader = DataLoader(dataset, batch_size, shuffle=True)
+train_data, val_data = random_split(dataset, [train_size, val_size])
 
+train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+val_loader   = DataLoader(val_data, batch_size=batch_size, shuffle=False)
 
-# transforming to cude GPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using:", device)
-
-
-# MODEL BUILDING
+# building the model
 model = EncoderTransformerClassifier().to(device)
-
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-
-# TRANING LOOP
+# training loop
 for epoch in range(max_iter):
-    model.train()
-    total_loss = 0
 
-    for xb, yb in loader:
+    # train
+    model.train()
+    train_loss = 0.0
+
+    for xb, yb in train_loader:
         xb, yb = xb.to(device), yb.to(device)
 
-        logits, loss = model(xb, yb)
-
         optimizer.zero_grad()
+        logits, loss = model(xb, yb)
         loss.backward()
         optimizer.step()
 
-        total_loss += loss.item()
+        train_loss += loss.item()
 
-    print(f"Epoch {epoch+1}: loss = {total_loss/len(loader):.4f}")
+    train_loss /= len(train_loader)
 
+    # validation
+    model.eval()
+    val_loss = 0.0
+    correct = 0
+    total = 0
 
+    with torch.no_grad():
+        for xb, yb in val_loader:
+            xb, yb = xb.to(device), yb.to(device)
 
+            logits, loss = model(xb, yb)
+            val_loss += loss.item()
 
-# getting some predictions
-probs = model.predict("manga yoqdi mol", tokenizer)[0].tolist()
-out = np.argmax(probs)
-print(probs)
-print('excellent' if out == 2 else 'fair' if out == 1 else 'poor')
+            preds = logits.argmax(dim=1)
+            correct += (preds == yb).sum().item()
+            total += yb.size(0)
 
+    val_loss /= len(val_loader)
+    val_acc = correct / total
 
+    print(f"epoch [{epoch+1}/{max_iter}] "
+      f"train loss: {train_loss:.4f} "
+      f"val loss: {val_loss:.4f} "
+      f"val acc: {val_acc:.4f}")
 
 # SAVING MODEL AND TOKENIZER
 torch.save(model.state_dict(), "encoder_transformer_classifier.pth")
 tokenizer.save("tokenizer.json")
+
+# testing 1
+text = "oyimga ko'rsattim bo'larkan, yoqmasa kerak deb o'ylagandim"
+probs = model.predict(text, tokenizer)[0].tolist()
+out = np.argmax(probs)
+print(probs)
+print('postive' if out == 2 else 'neutral' if out == 1 else 'negative')
+
+# testing 2
+text2 = "oyimga ko'rsattim bo'larkan, yoqmasa kerak deb o'ylagandim, lekin o'zimga to'grisi vashe ishlashi yoqmadi"
+probs2 = model.predict(text2, tokenizer)[0].tolist()
+out2 = np.argmax(probs2)
+print(probs2)
+print('postive' if out2 == 2 else 'neutral' if out2 == 1 else 'negative')
+
+# testing 3
+text3 = "telefon boshida yaxsh ishladi, keyin o'zidan o'zi ekrani ishlamiy qoldi"
+probs3 = model.predict(text3, tokenizer)[0].tolist()
+out3 = np.argmax(probs3)
+print(probs3)
+print('postive' if out3 == 2 else 'neutral' if out3 == 1 else 'negative')
+
+# testing 4
+text3 = "sotuvchiga bog'lanib bomayapti, texnikasi yaxsh chiqmadi"
+probs3 = model.predict(text3, tokenizer)[0].tolist()
+out3 = np.argmax(probs3)
+print(probs3)
+print('postive' if out3 == 2 else 'neutral' if out3 == 1 else 'negative')
+
+# testing 5
+text3 = "boshida yaxsh ishladi, keyin buzilib qoldi"
+probs3 = model.predict(text3, tokenizer)[0].tolist()
+out3 = np.argmax(probs3)
+print(probs3)
+print('postive' if out3 == 2 else 'neutral' if out3 == 1 else 'negative')
+
+# SAVING MODEL AND TOKENIZER
+torch.save(model.state_dict(), "encoder_transformer_classifier.pth")
+tokenizer.save("tokenizer.json")
+
+def count_module_params(module):
+    return sum(p.numel() for p in module.parameters() if p.requires_grad)
+
+embedding_params = count_module_params(model.token_embedding_table)
+pos_embedding_params = count_module_params(model.position_embedding_table)
+classifier_params = count_module_params(model.classifier)
+
+attn_params = 0
+ffw_params = 0
+for block in model.blocks:
+    attn_params += count_module_params(block.sa)
+    ffw_params += count_module_params(block.ffw)
+
+print(f"Embedding layer: {embedding_params}")
+print(f"Positional embedding: {pos_embedding_params}")
+print(f"Attention projections: {attn_params}")
+print(f"Feed-forward block: {ffw_params}")
+print(f"Classifier: {classifier_params}")
+
+print(f"Total trainable parameters: {embedding_params + pos_embedding_params + attn_params + ffw_params + classifier_params}")
