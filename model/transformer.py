@@ -4,18 +4,17 @@ import torch.nn.functional as F
 
 
 # PARAMETERS OF MODEL
-block_size = 128
-vocab_size = 30_000
+block_size = 32
 n_embd = 128
 n_head = 4
-n_layer = 4
+n_layer = 3
 dropout = 0.2
+batch_size = 64
+learning_rate = 2e-4
+vocab_size = 30_000
 
+max_iter = 5
 n_classes = 3
-
-
-
-
 
 
 
@@ -62,7 +61,7 @@ class FeedForward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4*n_embd, n_embd),
             nn.Dropout(dropout),
         )
@@ -134,3 +133,4 @@ class EncoderTransformerClassifier(nn.Module):
             probs = F.softmax(logits, dim=1)
 
         return probs.cpu().numpy()
+
